@@ -1,0 +1,46 @@
+rules:
+  - name: "hello"
+    pattern: ".*Hello.*"
+    target: "demo"
+    template: |
+      {
+        "action": "create",
+        "id": "${extracted.hello_id}",
+        "message": "${text}",
+        "attr1": "${static.__li_source_path}",
+        "attr2": "${extracted.__li_agent_id}"
+      }
+  - name: "goodbye"
+    pattern: ".*Goodbye.*"
+    target: "demo"
+    template: |
+      {
+        "action": "delete",
+        "status": "success",
+        "id": "${extracted.hello_id}",
+        "message": "${text}",
+        "attr1": "${static.__li_source_path}",
+        "attr2": "${extracted.__li_agent_id}"
+      }
+  - name: "new error"
+    pattern: ".*New error before the previous is handled.*"
+    target: "demo"
+    template: |
+      {
+        "action": "new",
+        "status": "error",
+        "datacenter": "${static.vmw_datacenter}",
+        "cluster": "${static.vmw_cluster}",
+        "host": "${static.hostname}",
+        "message": "${text}",
+      }
+targets:
+  - name: "demo"
+    url: "http://localhost:8888/ingest"
+    method: "POST"
+    authentication:
+      type: "Basic"
+      user: "ingest_user"
+      password: "ingest_password"
+    headers:
+      Content-Type: "application/json"
