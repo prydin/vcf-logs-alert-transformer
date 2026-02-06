@@ -43,7 +43,7 @@ rules:
         "cluster": "${static.vmw_cluster}",
         "host": "${static.hostname}",
         "user": "${extracted.user}",
-        "message": "${text}",
+        "message": "${text}"
       }
 
 # Message targets to which the processed alerts will be sent. Each target has a name, URL, HTTP method,

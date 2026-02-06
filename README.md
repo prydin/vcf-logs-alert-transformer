@@ -25,10 +25,12 @@ Built on FastAPI for speed and scalability, the tool is designed for production 
 ## Features
 
 - ✅ **Pattern-based routing**: Match alerts by name and/or message content using regular expressions
-- ✅ **Template-based transformation**: Transform alert payloads using customizable JSON templates with field substitution
+- ✅ **Template-based transformation**: Transform alert payloads using customizable JSON templates with field substitution and Python expressions
+- ✅ **Expression evaluation**: Use Python expressions for complex data transformations (arithmetic, string operations, conditionals)
 - ✅ **Multiple targets**: Route different alerts to different endpoints
 - ✅ **Authentication support**: Basic authentication (extensible for other types)
 - ✅ **Automatic retry**: Failed messages are queued to disk and retried automatically
+- ✅ **Rate limiting handling**: Automatically backs off when encountering 429 responses
 - ✅ **Fast & scalable**: Built on FastAPI and Uvicorn for high performance
 - ✅ **Flexible logging**: Debug mode for development, minimal logging for production
 
@@ -165,7 +167,9 @@ Multiple rules can match the same alert, resulting in multiple transformed messa
 
 #### Template Substitution
 
-Templates support variable substitution using the `${variable}` syntax:
+Templates support both simple variable substitution and Python expressions using the `${...}` syntax:
+
+**Simple Variable Substitution:**
 
 | Variable Format | Description | Example |
 |----------------|-------------|---------|
@@ -173,6 +177,37 @@ Templates support variable substitution using the `${variable}` syntax:
 | `${extracted.field_name}` | Custom extracted field from the alert | `${extracted.hello_id}` |
 | `${static.field_name}` | Static (built-in) field from the alert | `${static.__li_source_path}` |
 | `${field_name}` | Top-level event field | `${alert_name}` |
+
+**Python Expression Support:**
+
+You can use Python expressions for complex transformations:
+
+| Expression Example | Description |
+|-------------------|-------------|
+| `${int(static['count']) + 10}` | Arithmetic operations |
+| `${static['first'] + '-' + static['last']}` | String concatenation |
+| `${text.upper()}` | String methods |
+| `${len(text)}` | String length |
+| `${max(int(static['a']), int(static['b']))}` | Math functions |
+| `${static.get('value', 'default')}` | Dictionary operations with defaults |
+
+**Available Functions in Expressions:**
+- `len()`, `str()`, `int()`, `float()`, `bool()`
+- `min()`, `max()`, `sum()`, `abs()`, `round()`
+
+**Example Template with Expressions:**
+```yaml
+template: |
+  {
+    "alert": "${text}",
+    "severity": "${int(static.get('severity', '0')) > 5 and 'high' or 'low'}",
+    "count": ${int(extracted.get('count', '1')) * 2},
+    "message": "${text.upper()}",
+    "length": ${len(text)}
+  }
+```
+
+> **Note**: Expressions are evaluated safely using `simpleeval`, which prevents unsafe operations like file access or imports.
 
 **Common Static Fields:**
 - `${static.__li_source_path}` - Source path in Log Insight

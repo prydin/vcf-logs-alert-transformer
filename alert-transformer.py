@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import FastAPI, Body
 import uvicorn
 import requests
+from simpleeval import simple_eval
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -158,29 +159,115 @@ def do_substitutions(template, substitutions, event):
     """
     Perform template substitutions using event data.
 
+    Supports both simple variable substitution and Python expressions.
+    Simple substitution: ${field_name} or ${static.field_name} or ${extracted.field_name}
+    Python expressions: ${static['a'] + static['b']} or ${len(text) > 100} or ${static.get('count', 0) * 2}
+
     Args:
         template (str): Template string with ${field} placeholders
-        substitutions (list): List of field names to substitute
+        substitutions (list): List of field names/expressions to substitute
         event (dict): Event data containing fields
 
     Returns:
         str: Template with substitutions applied
     """
-    static_fields = parse_fields(event.get("staticFields", {}))
-    extracted_fields = parse_fields(event.get("extractedFields", {}))
+    static_fields = parse_fields(event.get("staticFields", []))
+    extracted_fields = parse_fields(event.get("extractedFields", []))
+
+    # Prepare context for expression evaluation
+    eval_context = {
+        "static": static_fields,
+        "extracted": extracted_fields,
+        "text": event.get("text", ""),
+        "alert_name": event.get("alert_name", "")
+    }
+
+    # Add all top-level event fields to context
+    for key, value in event.items():
+        if key not in eval_context and is_simple_identifier(key):
+            eval_context[key] = value
 
     result = template
     for sub in substitutions:
-        (prefix, name) = sub.split(".", 1) if "." in sub else ("", sub)
-        if prefix == "static":
-            value = static_fields.get(name, "")
-        elif prefix == "extracted":
-            value = extracted_fields.get(name, "")
+        value = ""
+
+        # Check if this is a simple field reference or an expression
+        # Simple patterns: "field", "static.field", "extracted.field"
+        if "." in sub:
+            parts = sub.split(".", 1)
+            if len(parts) == 2 and parts[0] in ["static", "extracted"] and is_simple_identifier(parts[1]):
+                # Simple field reference
+                prefix, name = parts
+                if prefix == "static":
+                    value = static_fields.get(name, "")
+                elif prefix == "extracted":
+                    value = extracted_fields.get(name, "")
+            else:
+                # Treat as Python expression
+                value = evaluate_expression(sub, eval_context)
+        elif is_simple_identifier(sub):
+            # Simple top-level field reference
+            value = eval_context.get(sub, "")
         else:
-            value = event.get(name, "")
+            # Treat as Python expression
+            value = evaluate_expression(sub, eval_context)
+
+        # Convert value to string if it's not already
+        if not isinstance(value, str):
+            value = str(value)
+
         result = result.replace("${" + sub + "}", value)
         logger.debug(f"Substituted ${{{sub}}} with '{value}'")
+
     return result
+
+
+def is_simple_identifier(s):
+    """
+    Check if a string is a simple identifier (alphanumeric and underscores only).
+
+    Args:
+        s (str): String to check
+
+    Returns:
+        bool: True if the string is a simple identifier
+    """
+    return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s))
+
+
+def evaluate_expression(expression, context):
+    """
+    Safely evaluate a Python expression using simpleeval.
+
+    Args:
+        expression (str): Python expression to evaluate
+        context (dict): Context variables for evaluation
+
+    Returns:
+        str: Result of the expression evaluation, or empty string on error
+    """
+    try:
+        # Define safe functions that can be used in expressions
+        safe_functions = {
+            'len': len,
+            'str': str,
+            'int': int,
+            'float': float,
+            'bool': bool,
+            'min': min,
+            'max': max,
+            'sum': sum,
+            'abs': abs,
+            'round': round,
+        }
+
+        # Use simple_eval with safe functions
+        result = simple_eval(expression, names=context, functions=safe_functions)
+        logger.debug(f"Expression '{expression}' evaluated to: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Failed to evaluate expression '{expression}': {e}")
+        return ""
 
 
 def save_message(message, target):
@@ -188,12 +275,12 @@ def save_message(message, target):
     Save a failed message to disk for later retry.
 
     Args:
-        message (dict): Message to save
+        message (str): Message to save
         target (str): Target name
     """
     filename = f"{queue_dir}/{target}_{int(time.time() * 1000)}.work"
     with open(filename, "w") as f:
-        json.dump(message, f)
+        f.write(message)
     os.rename(filename, filename.replace(".work", ".msg"))
     logger.info(f"Saved message for target '{target}' to {filename.replace('.work', '.msg')}")
 
@@ -204,11 +291,19 @@ def send_event(target, message):
 
     Args:
         target (dict): Target configuration with url, method, headers, and auth
-        message (dict): Message to send
+        message (str): Message to send
 
     Returns:
-        bool: True if message was sent successfully, False otherwise
+        str: Status of the send operation:
+            - "success": Message sent successfully (2xx)
+            - "retry": Temporary failure, should retry (network errors, 5xx)
+            - "rate_limited": Rate limited (429), should retry with backoff
+            - "permanent": Permanent failure, should not retry (4xx client errors)
     """
+    # Non-recoverable HTTP status codes (client errors)
+    # Note: 429 (Too Many Requests) is recoverable with backoff, so not included here
+    NON_RECOVERABLE_CODES = {400, 401, 403, 404, 405, 406, 409, 410, 411, 413, 414, 415, 416, 422}
+
     url = target.get("url", "")
     method = target.get("method", "POST").upper()
     headers = target.get("headers", {})
@@ -221,15 +316,24 @@ def send_event(target, message):
             request_auth = None
             logger.warning(f"Unsupported authentication type: {auth.get('type', '')}")
     try:
-        response = requests.request(method=method, url=url, json=message, headers=headers, auth=request_auth)
+        response = requests.request(method=method, url=url, data=message, headers=headers, auth=request_auth)
     except Exception as e:
         logger.error(f"Failed to send event to {url}: {e}")
-        return False
-    if response.status_code not in range(200, 299):
+        return "retry"  # Network errors are recoverable
+
+    if response.status_code in range(200, 299):
+        logger.info(f"Sent event to {url}, response code: {response.status_code}")
+        return "success"
+    elif response.status_code == 429:
+        logger.warning(f"Rate limited by {url}, response code: 429")
+        return "rate_limited"
+    elif response.status_code in NON_RECOVERABLE_CODES:
+        logger.error(f"Permanent failure sending event to {url}, response code: {response.status_code}, response body: {response.text}")
+        logger.error(f"Message will NOT be retried (non-recoverable error)")
+        return "permanent"
+    else:
         logger.error(f"Failed to send event to {url}, response code: {response.status_code}, response body: {response.text}")
-        return False
-    logger.info(f"Sent event to {url}, response code: {response.status_code}")
-    return True
+        return "retry"
 
 
 def retry_saved_messages():
@@ -238,8 +342,11 @@ def retry_saved_messages():
 
     Scans the queue directory for saved messages and attempts to send them.
     Successfully sent messages are removed from the queue.
+    If rate limiting (429) is encountered, sleeps for 60 seconds before continuing.
     """
     while True:
+        rate_limited = False
+
         # Get files in date order (oldest first)
         filenames = os.listdir(queue_dir)
         filenames = [os.path.join(queue_dir, f) for f in filenames]
@@ -249,7 +356,7 @@ def retry_saved_messages():
             if filename.endswith(".msg"):
                 filepath = os.path.join(queue_dir, filename)
                 with open(filepath, "r") as f:
-                    message = json.load(f)
+                    message = f.read()
 
                 # Target is the first part of the filename before the underscore
                 target_name = os.path.basename(filename).split("_")[0]
@@ -257,12 +364,26 @@ def retry_saved_messages():
                     logger.warning(f"No valid target for saved message, skipping: {filename}")
                     continue
                 target = targets[target_name]
-                if send_event(target, message):
+                result = send_event(target, message)
+                if result == "success":
                     os.remove(filepath)
                     logger.info(f"Successfully sent saved message, removed file: {filename}")
-                else:
+                elif result == "permanent":
+                    # Don't retry permanent failures, remove the message
+                    os.remove(filepath)
+                    logger.warning(f"Removed message with permanent failure: {filename}")
+                elif result == "rate_limited":
+                    logger.warning(f"Rate limited, will sleep for 60 seconds before retrying")
+                    rate_limited = True
+                    break  # Stop processing and sleep
+                else:  # result == "retry"
                     logger.debug(f"Failed to send saved message, will retry later: {filename}")
-        time.sleep(10)
+
+        # If we encountered rate limiting, sleep for 60 seconds
+        if rate_limited:
+            time.sleep(60)
+        else:
+            time.sleep(10)
 
 
 app = FastAPI()
@@ -311,9 +432,16 @@ def handle_alert(payload: Any = Body(None)):
                 logger.warning(f"No valid target for rule '{rule.get('name', 'Unnamed Rule')}', skipping")
                 continue
             target = targets[target_name]
-            if not send_event(target, output_message):
-                logger.warning(f"Failed to send message to target: {target_name}")
-                save_message(output_message, target_name)
+            result = send_event(target, output_message)
+            if result == "retry" or result == "rate_limited":
+                if result == "rate_limited":
+                    logger.warning(f"Rate limited by target: {target_name}, message queued for retry")
+                else:
+                    logger.warning(f"Failed to send message to target: {target_name}, will retry")
+                if queue_dir:
+                    save_message(output_message, target_name)
+            elif result == "permanent":
+                logger.error(f"Permanent failure for target: {target_name}, message discarded")
     return "OK", 200
 
 
