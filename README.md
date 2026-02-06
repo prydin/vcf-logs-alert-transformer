@@ -19,6 +19,8 @@ Built on FastAPI for speed and scalability, the tool is designed for production 
 - **`dummy-server.py`** - Test server for receiving and displaying transformed alerts
 - **`config.yaml`** - Configuration file with rules and targets
 - **`test-e2e.sh`** - Automated end-to-end test script
+- **`requirements.txt`** - Python package dependencies
+- **`Dockerfile`** - Docker container configuration
 
 ## Features
 
@@ -39,16 +41,24 @@ Built on FastAPI for speed and scalability, the tool is designed for production 
 
 ### Install Dependencies
 
+**Using requirements.txt (recommended):**
+
+```bash
+pip install -r requirements.txt
+```
+
+**Or install packages individually:**
+
 ```bash
 pip install fastapi uvicorn pyyaml requests
 ```
 
-Or using a virtual environment (recommended):
+**Using a virtual environment (recommended for development):**
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install fastapi uvicorn pyyaml requests
+pip install -r requirements.txt
 ```
 
 ## Command Line Usage
@@ -505,30 +515,9 @@ sudo systemctl status alert-transformer
 
 ### Docker Deployment
 
-Create a `Dockerfile`:
+A `Dockerfile` is included in the project for containerized deployments.
 
-```dockerfile
-FROM python:3.9-slim
-
-WORKDIR /app
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-COPY alert-transformer.py .
-COPY config.yaml .
-
-RUN mkdir -p /var/lib/alert-transformer/queue
-
-EXPOSE 8080
-
-CMD ["python", "alert-transformer.py", \
-     "-c", "/app/config.yaml", \
-     "-q", "/var/lib/alert-transformer/queue", \
-     "-p", "8080"]
-```
-
-Build and run:
+**Build and run:**
 ```bash
 docker build -t alert-transformer .
 docker run -d \
