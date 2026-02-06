@@ -187,6 +187,8 @@ You can use Python expressions for complex transformations:
 | `${int(static['count']) + 10}` | Arithmetic operations |
 | `${static['first'] + '-' + static['last']}` | String concatenation |
 | `${text.upper()}` | String methods |
+| `${upper(text)}` | String to uppercase (function) |
+| `${lower(static['name'])}` | String to lowercase (function) |
 | `${len(text)}` | String length |
 | `${max(int(static['a']), int(static['b']))}` | Math functions |
 | `${static.get('value', 'default')}` | Dictionary operations with defaults |
@@ -194,6 +196,7 @@ You can use Python expressions for complex transformations:
 **Available Functions in Expressions:**
 - `len()`, `str()`, `int()`, `float()`, `bool()`
 - `min()`, `max()`, `sum()`, `abs()`, `round()`
+- `upper()`, `lower()` - Convert strings to uppercase or lowercase
 
 **Example Template with Expressions:**
 ```yaml

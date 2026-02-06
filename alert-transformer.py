@@ -84,6 +84,7 @@ def parse_config(filename):
     Reads a YAML configuration file and processes it by:
     - Compiling regex patterns for name and message matching
     - Extracting template substitution placeholders
+    - Validating that templates contain valid JSON
     - Building a structured configuration dictionary
 
     Args:
@@ -93,6 +94,9 @@ def parse_config(filename):
         dict: Parsed configuration dictionary containing:
             - rules (list): List of rule dictionaries with compiled patterns
             - targets (list): List of target endpoint configurations
+
+    Raises:
+        ValueError: If a template contains invalid JSON
     """
     with open(filename, "r") as f:
         config = yaml.safe_load(f)
@@ -103,6 +107,11 @@ def parse_config(filename):
                 rule["compiled_message_pattern"] = re.compile(rule["messagePattern"])
             if "template" in rule:
                 logger.debug(f"Template: {rule['template']}")
+
+                # Validate that template is valid JSON
+                # We'll create a test version with dummy values for placeholders
+                validate_template_json(rule["template"], rule.get("name", "unnamed"))
+
                 substitutions = []
                 matches = field_extractor.finditer(rule["template"])
                 for m in matches:
@@ -110,6 +119,36 @@ def parse_config(filename):
                     logger.debug(f"Found substitution: {m.group(1)}")
                 rule["template_substitutions"] = substitutions
     return config
+
+
+def validate_template_json(template, rule_name):
+    """
+    Validate that a template contains valid JSON structure.
+
+    Replaces all ${...} placeholders with appropriate dummy values and attempts to parse as JSON.
+    Handles both quoted placeholders (strings) and unquoted placeholders (expressions).
+
+    Args:
+        template (str): Template string to validate
+        rule_name (str): Name of the rule (for error messages)
+
+    Raises:
+        ValueError: If the template is not valid JSON
+    """
+    # First, replace quoted placeholders: "${...}" -> "__STRING__"
+    test_template = re.sub(r'"\$\{[^}]+}"', '"__STRING__"', template)
+
+    # Then, replace unquoted placeholders: ${...} -> 0 (for numeric/expression contexts)
+    test_template = re.sub(r'\$\{[^}]+}', '0', test_template)
+
+    try:
+        json.loads(test_template)
+        logger.debug(f"Template for rule '{rule_name}' is valid JSON")
+    except json.JSONDecodeError as e:
+        error_msg = f"Template for rule '{rule_name}' contains invalid JSON: {e}"
+        logger.error(error_msg)
+        logger.error(f"Template content:\n{template}")
+        raise ValueError(error_msg)
 
 
 def match_message(config, name, text):
@@ -153,6 +192,30 @@ def parse_fields(fields):
         value = field.get("content", "")
         result[key] = value
     return result
+
+
+def json_escape(s):
+    """
+    Escape a string to make it JSON-safe.
+
+    Escapes special characters that need to be escaped in JSON strings:
+    - Double quotes (")
+    - Backslashes (\)
+    - Control characters (newlines, tabs, etc.)
+
+    Args:
+        s (str): String to escape
+
+    Returns:
+        str: JSON-safe escaped string
+    """
+    # Use json.dumps to properly escape the string, then remove the surrounding quotes
+    # This handles all JSON escape sequences correctly
+    if not s:
+        return s
+    escaped = json.dumps(s, ensure_ascii=False)
+    # Remove the leading and trailing quotes that json.dumps adds
+    return escaped[1:-1]
 
 
 def do_substitutions(template, substitutions, event):
@@ -216,6 +279,9 @@ def do_substitutions(template, substitutions, event):
         if not isinstance(value, str):
             value = str(value)
 
+        # Escape the value to make it JSON-safe
+        value = json_escape(value)
+
         result = result.replace("${" + sub + "}", value)
         logger.debug(f"Substituted ${{{sub}}} with '{value}'")
 
@@ -259,6 +325,8 @@ def evaluate_expression(expression, context):
             'sum': sum,
             'abs': abs,
             'round': round,
+            'upper': lambda s: str(s).upper(),
+            'lower': lambda s: str(s).lower(),
         }
 
         # Use simple_eval with safe functions

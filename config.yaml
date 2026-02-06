@@ -41,8 +41,9 @@ rules:
         "status": "error",
         "datacenter": "${static.vmw_datacenter}",
         "cluster": "${static.vmw_cluster}",
-        "host": "${static.hostname}",
+        "host": "${upper(static.hostname)}",
         "user": "${extracted.user}",
+        "userLength": "${len(extracted.user)}",
         "message": "${text}"
       }
 
