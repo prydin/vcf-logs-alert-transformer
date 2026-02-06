@@ -206,6 +206,8 @@ authentication:
   password: "password"
 ```
 
+> **⚠️ Security Note**: In this pre-release version, passwords are stored in clear text in the configuration file. This is not suitable for production use. Proper secret management (using environment variables, secret vaults, or encrypted configuration) will be implemented in a future release.
+
 Additional authentication types can be added as needed.
 
 ### Complete Example
@@ -625,6 +627,23 @@ For high-volume deployments, consider:
 ## License
 
 **THIS IS SAMPLE CODE - DO NOT USE IN PRODUCTION WITHOUT PROPER TESTING AND SECURITY REVIEW**
+
+### ⚠️ Pre-Release Security Notice
+
+This is a **pre-release version** with the following known security limitations:
+
+- **Passwords in clear text**: Authentication credentials are stored unencrypted in the configuration file
+- **No secret management**: No integration with secret vaults or encrypted storage
+- **Limited input validation**: Minimal sanitization of incoming data
+
+**Proper secret management** (environment variables, HashiCorp Vault, AWS Secrets Manager, etc.) **will be implemented in a future release**.
+
+For production use, you must implement proper security measures including:
+- Secret management and encrypted credential storage
+- Input validation and sanitization
+- TLS/SSL encryption for all communications
+- Rate limiting and DDoS protection
+- Comprehensive security testing and audit
 
 ## Support and Contributing
 
