@@ -1,17 +1,27 @@
 rules:
-  - name: "hello"
-    pattern: ".*Hello.*"
-    target: "demo"
-    template: |
+  - name: "hello"                               # Descriptive name of the rule
+    namePattern: ".*hello.*"                    # Regular expression to match the name of the alert (optional)
+    messagePattern: ".*Hello.*"                 # Regular expression to match the message of the alert (optional)
+    target: "demo"                              # Target to which the processed alert will be sent (defined below)
+
+    # Output format template
+    # Variables are replaced as follows:
+    # ${text} - the original alert message
+    # ${extracted.field_name} - value of a custom extracted field
+    # ${static.field_name} - value of the static (built-in) field
+    template: |                                 
       {
-        "action": "create",
+        "action": "create",                 
         "id": "${extracted.hello_id}",
         "message": "${text}",
         "attr1": "${static.__li_source_path}",
         "attr2": "${extracted.__li_agent_id}"
       }
+    # This demonstrates how to use the same alert but send it with different values depending on some messagePattern:
+    # in the message. Here, if the message contains "Goodbye", it will be sent with the action "delete" instead of "create".
   - name: "goodbye"
-    pattern: ".*Goodbye.*"
+    namePattern: ".*hello.*"
+    messagePattern: ".*Goodbye.*"
     target: "demo"
     template: |
       {
@@ -23,7 +33,7 @@ rules:
         "attr2": "${extracted.__li_agent_id}"
       }
   - name: "new error"
-    pattern: ".*New error before the previous is handled.*"
+    namePattern: "New Error before old is handled" # Name matching only. Will match all alerts with this name.
     target: "demo"
     template: |
       {
@@ -32,8 +42,12 @@ rules:
         "datacenter": "${static.vmw_datacenter}",
         "cluster": "${static.vmw_cluster}",
         "host": "${static.hostname}",
+        "user": "${extracted.user}",
         "message": "${text}",
       }
+
+# Message targets to which the processed alerts will be sent. Each target has a name, URL, HTTP method,
+# and optional authentication and headers. Currently, only Basic authentication is supported, but other types may be added in the future.
 targets:
   - name: "demo"
     url: "http://localhost:8888/ingest"
