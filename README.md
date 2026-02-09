@@ -1,4 +1,4 @@
-# Alert Transformer
+# VCF Operations for Logs Alert Transformer
 
 A high-performance FastAPI-based web service that receives alerts from VMware vRealize Log Insight / VMware Aria Operations for Logs (VCF Operations for Logs) and transforms them according to configurable rules before forwarding to target systems.
 
