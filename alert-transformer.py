@@ -3,6 +3,7 @@
 import json
 import os
 import time
+import uuid
 from threading import Thread
 import argparse
 import logging
@@ -26,6 +27,9 @@ port = 8080
 
 field_extractor = re.compile(r"\$\{([^}]+)}", re.MULTILINE | re.DOTALL)
 
+# Global dictionary for ID mappings
+id_mappings = {}
+ID_MAPPINGS_MAX_SIZE = 100000
 
 def parse_args():
     """
@@ -86,6 +90,7 @@ def parse_config(filename):
     - Extracting template substitution placeholders
     - Validating that templates contain valid JSON
     - Building a structured configuration dictionary
+    - Processing inverseOf relationships for anti-flapping
 
     Args:
         filename (str): Path to the YAML configuration file to parse
@@ -94,12 +99,23 @@ def parse_config(filename):
         dict: Parsed configuration dictionary containing:
             - rules (list): List of rule dictionaries with compiled patterns
             - targets (list): List of target endpoint configurations
+            - rules_by_name (dict): Lookup dictionary mapping rule names to rule objects
 
     Raises:
         ValueError: If a template contains invalid JSON
     """
     with open(filename, "r") as f:
         config = yaml.safe_load(f)
+
+        # Build rule name lookup first
+        rules_by_name = {}
+        for rule in config.get("rules", []):
+            rule_name = rule.get("name")
+            if rule_name:
+                rules_by_name[rule_name] = rule
+
+        config["rules_by_name"] = rules_by_name
+
         for rule in config.get("rules", []):
             if "namePattern" in rule:
                 rule["compiled_name_pattern"] = re.compile(rule["namePattern"])
@@ -118,6 +134,17 @@ def parse_config(filename):
                     substitutions.append(m.group(1))
                     logger.debug(f"Found substitution: {m.group(1)}")
                 rule["template_substitutions"] = substitutions
+
+            # Process inverseOf relationship for anti-flapping
+            if "inverseOf" in rule:
+                inverse_rule_name = rule["inverseOf"]
+                if inverse_rule_name not in rules_by_name:
+                    logger.warning(f"Rule '{rule.get('name')}' references non-existent inverseOf rule: '{inverse_rule_name}'")
+                else:
+                    logger.debug(f"Rule '{rule.get('name')}' is inverse of '{inverse_rule_name}'")
+                    # Mark this as a cancelling rule
+                    # Store reference to the initiating rule
+                    rule["initiating_rule"] = rules_by_name[inverse_rule_name]
     return config
 
 
@@ -241,64 +268,100 @@ def do_substitutions(template, substitutions, event):
     eval_context = {
         "static": static_fields,
         "extracted": extracted_fields,
-        "text": event.get("text", ""),
-        "alert_name": event.get("alert_name", "")
     }
-
-    # Add all top-level event fields to context
-    for key, value in event.items():
-        if key not in eval_context and is_simple_identifier(key):
-            eval_context[key] = value
+    for k in event.keys():
+        if k not in ["staticFields", "extractedFields"]:
+            eval_context[k] = event[k]
 
     result = template
     for sub in substitutions:
-        value = ""
-
-        # Check if this is a simple field reference or an expression
-        # Simple patterns: "field", "static.field", "extracted.field"
-        if "." in sub:
-            parts = sub.split(".", 1)
-            if len(parts) == 2 and parts[0] in ["static", "extracted"] and is_simple_identifier(parts[1]):
-                # Simple field reference
-                prefix, name = parts
-                if prefix == "static":
-                    value = static_fields.get(name, "")
-                elif prefix == "extracted":
-                    value = extracted_fields.get(name, "")
-            else:
-                # Treat as Python expression
-                value = evaluate_expression(sub, eval_context)
-        elif is_simple_identifier(sub):
-            # Simple top-level field reference
-            value = eval_context.get(sub, "")
-        else:
-            # Treat as Python expression
-            value = evaluate_expression(sub, eval_context)
-
-        # Convert value to string if it's not already
-        if not isinstance(value, str):
-            value = str(value)
+        value = str(evaluate_expression(sub, eval_context))
 
         # Escape the value to make it JSON-safe
         value = json_escape(value)
-
         result = result.replace("${" + sub + "}", value)
         logger.debug(f"Substituted ${{{sub}}} with '{value}'")
-
     return result
 
 
-def is_simple_identifier(s):
+def gen_id(name):
     """
-    Check if a string is a simple identifier (alphanumeric and underscores only).
+    Generate a unique ID and map it to the given name.
+
+    Creates a unique ID (based on timestamp and counter) and stores the mapping
+    in the global id_mappings dictionary. If a mapping already exists for the
+    given name, it returns the existing ID.
+
+    The id_mappings dictionary is limited to ID_MAPPINGS_MAX_SIZE entries to prevent
+    memory leaks. If the limit is exceeded, a warning is logged and an empty string
+    is returned.
 
     Args:
-        s (str): String to check
+        name (str): Name/key to associate with the generated ID
 
     Returns:
-        bool: True if the string is a simple identifier
+        str: The generated unique ID (or existing ID if already mapped), or empty string if limit exceeded
     """
-    return bool(re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', s))
+    if name in id_mappings:
+        logger.debug(f"gen_id: Name '{name}' already has ID '{id_mappings[name]}', returning existing ID")
+        return id_mappings[name]
+
+    # Check if we've exceeded the maximum size
+    if len(id_mappings) >= ID_MAPPINGS_MAX_SIZE:
+        logger.warning(f"gen_id: ID mappings limit of {ID_MAPPINGS_MAX_SIZE} exceeded. Cannot generate new ID for '{name}'. Consider using consume_id() to remove old mappings.")
+        return ""
+
+    # Generate a unique ID using timestamp and a counter
+    unique_id = str(uuid.uuid4())
+    id_mappings[name] = unique_id
+    logger.debug(f"gen_id: Generated ID '{unique_id}' for name '{name}' (total mappings: {len(id_mappings)})")
+    return unique_id
+
+
+def consume_id(name):
+    """
+    Retrieve and consume an ID mapped to the given name.
+
+    Looks up the ID associated with the given name in the id_mappings dictionary.
+    Once retrieved, the mapping is deleted from the dictionary (one-time use).
+
+    Args:
+        name (str): Name/key to look up
+
+    Returns:
+        str: The ID associated with the name, or empty string if not found
+    """
+    if name in id_mappings:
+        unique_id = id_mappings[name]
+        del id_mappings[name]
+        logger.debug(f"consume_id: Retrieved and consumed ID '{unique_id}' for name '{name}'")
+        return unique_id
+    else:
+        logger.warning(f"consume_id: No ID found for name '{name}'")
+        return ""
+
+
+def use_id(name):
+    """
+    Retrieve an ID mapped to the given name without consuming it.
+
+    Looks up the ID associated with the given name in the id_mappings dictionary.
+    Unlike consume_id, this does not delete the mapping, allowing multiple uses.
+
+    Args:
+        name (str): Name/key to look up
+
+    Returns:
+        str: The ID associated with the name, or empty string if not found
+    """
+    if name in id_mappings:
+        unique_id = id_mappings[name]
+        logger.debug(f"use_id: Retrieved ID '{unique_id}' for name '{name}' (not consumed)")
+        return unique_id
+    else:
+        logger.warning(f"use_id: No ID found for name '{name}'")
+        return ""
+
 
 
 def evaluate_expression(expression, context):
@@ -327,6 +390,9 @@ def evaluate_expression(expression, context):
             'round': round,
             'upper': lambda s: str(s).upper(),
             'lower': lambda s: str(s).lower(),
+            'gen_id': gen_id,
+            'consume_id': consume_id,
+            'use_id': use_id,
         }
 
         # Use simple_eval with safe functions
@@ -453,6 +519,28 @@ def retry_saved_messages():
         else:
             time.sleep(10)
 
+def send_event_with_retry(target, message):
+    """
+    Send an event message to a target endpoint with retry logic.
+
+    If sending fails due to a recoverable error (network issues, 5xx, or 429), the message is saved for later retry.
+    Permanent failures (4xx client errors) are not retried and are logged as errors.
+
+    Args:
+        target (dict): Target configuration with url, method, headers, and auth
+        message (str): Message to send
+    """
+    target_name = target.get("name", "unknown")
+    result = send_event(target, message)
+    if result == "retry" or result == "rate_limited":
+        if result == "rate_limited":
+            logger.warning(f"Rate limited by target: {target_name}, message queued for retry")
+        else:
+            logger.warning(f"Failed to send message to target: {target_name}, will retry")
+        if queue_dir:
+            save_message(message, target_name)
+    elif result == "permanent":
+        logger.error(f"Permanent failure for target: {target_name}, message discarded")
 
 app = FastAPI()
 config = {}
@@ -489,27 +577,30 @@ def handle_alert(payload: Any = Body(None)):
     logger.debug(f"Received alert payload: {json.dumps(payload, indent=2)}")
     alert_name = payload.get("alert_name", "")
     messages = json.loads(payload.get("messages", "[]"))
+    immediate_events = []
+    deferred_events = []
+
+    # Make sure deferred events are processed after immediate events to allow for anti-flapping rules to work correctly
+    logger.debug(f"Processing {len(messages)} messages for alert '{alert_name}'")
     for event in messages:
         text = event.get("text", "")
         for rule in match_message(config, alert_name, text):
-            logger.info(f"Matched rule: {rule.get('name', 'Unnamed Rule')}")
-            output_message = do_substitutions(rule.get("template", ""), rule.get("template_substitutions", []), event)
-            logger.debug(f"Output message: {output_message}")
-            target_name = rule.get("target", None)
-            if target_name is None or target_name not in targets:
-                logger.warning(f"No valid target for rule '{rule.get('name', 'Unnamed Rule')}', skipping")
-                continue
-            target = targets[target_name]
-            result = send_event(target, output_message)
-            if result == "retry" or result == "rate_limited":
-                if result == "rate_limited":
-                    logger.warning(f"Rate limited by target: {target_name}, message queued for retry")
-                else:
-                    logger.warning(f"Failed to send message to target: {target_name}, will retry")
-                if queue_dir:
-                    save_message(output_message, target_name)
-            elif result == "permanent":
-                logger.error(f"Permanent failure for target: {target_name}, message discarded")
+            if str(rule.get("defer", "false")).lower() == "true":
+                deferred_events.append((event, rule))
+            else:
+                immediate_events.append((event, rule))
+
+    for (event, rule) in (immediate_events + deferred_events):
+        logger.info(f"Matched rule: {rule.get('name', 'Unnamed Rule')}")
+        output_message = do_substitutions(rule.get("template", ""), rule.get("template_substitutions", []), event)
+        logger.debug(f"Output message: {output_message}")
+        target_name = rule.get("target", None)
+        if target_name is None or target_name not in targets:
+            logger.warning(f"No valid target for rule '{rule.get('name', 'Unnamed Rule')}', skipping")
+            continue
+        target = targets[target_name]
+        send_event_with_retry(target, output_message)
+
     return "OK", 200
 
 

@@ -15,14 +15,18 @@ rules:
         "id": "${extracted.hello_id}",
         "message": "${text}",
         "attr1": "${static.__li_source_path}",
-        "attr2": "${extracted.__li_agent_id}"
+        "attr2": "${extracted.__li_agent_id}",
+        "generated_id": "${gen_id(extracted.hello_id)}"
       }
     # This demonstrates how to use the same alert but send it with different values depending on some messagePattern:
     # in the message. Here, if the message contains "Goodbye", it will be sent with the action "delete" instead of "create".
+    # The defer flag ensures this rule is processed AFTER the "hello" rule, even if both rules match the same alert.
+    # This is useful for cancellation/cleanup rules that should run after initiation rules.
   - name: "goodbye"
     namePattern: ".*hello.*"
     messagePattern: ".*Goodbye.*"
     target: "demo"
+    defer: true                       # Process this rule after non-deferred rules
     template: |
       {
         "action": "delete",
@@ -30,10 +34,11 @@ rules:
         "id": "${extracted.hello_id}",
         "message": "${text}",
         "attr1": "${static.__li_source_path}",
-        "attr2": "${extracted.__li_agent_id}"
+        "attr2": "${extracted.__li_agent_id}",
+        "generated_id": "${consume_id(extracted.hello_id)}"
       }
   - name: "new error"
-    namePattern: "New Error before old is handled" # Name matching only. Will match all alerts with this name.
+    namePattern: "---New Error before old is handled" # Name matching only. Will match all alerts with this name.
     target: "demo"
     template: |
       {

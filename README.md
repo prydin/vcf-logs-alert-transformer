@@ -27,6 +27,7 @@ Built on FastAPI for speed and scalability, the tool is designed for production 
 - ✅ **Pattern-based routing**: Match alerts by name and/or message content using regular expressions
 - ✅ **Template-based transformation**: Transform alert payloads using customizable JSON templates with field substitution and Python expressions
 - ✅ **Expression evaluation**: Use Python expressions for complex data transformations (arithmetic, string operations, conditionals)
+- ✅ **ID generation & correlation**: Generate unique IDs and correlate related alerts across multiple events
 - ✅ **Multiple targets**: Route different alerts to different endpoints
 - ✅ **Authentication support**: Basic authentication (extensible for other types)
 - ✅ **Automatic retry**: Failed messages are queued to disk and retried automatically
@@ -156,6 +157,7 @@ Each rule defines how to match and transform incoming alerts.
 | `messagePattern` | No | Regular expression to match the alert message text. If omitted, all messages match. |
 | `target` | Yes | Name of the target (defined in `targets` section) where the transformed alert should be sent |
 | `template` | Yes | JSON template for the output message with variable substitution |
+| `defer` | No | If set to `true`, events matching this rule are processed after non-deferred events. Default: `false` |
 
 #### Pattern Matching
 
@@ -164,6 +166,76 @@ Rules are evaluated in order. An alert matches a rule if:
 - **AND** the message text matches the `messagePattern` (if specified)
 
 Multiple rules can match the same alert, resulting in multiple transformed messages being sent to different targets.
+
+#### Deferred Event Processing
+
+The `defer` attribute controls the processing order of events that match multiple rules. This is particularly useful when you have pairs of related events (e.g., initiating and cancelling events) that might arrive in the same VCF Operations for Logs query period.
+
+**How Deferred Processing Works:**
+
+1. **Immediate Events** (default): Events matching rules without `defer: true` are processed first
+2. **Deferred Events**: Events matching rules with `defer: true` are processed after all immediate events
+
+This ensures a consistent processing order regardless of the order in which rules match the events.
+
+**Use Cases:**
+
+- **Cancellation Events**: Mark cancellation rules as deferred so they process after corresponding initiation events
+- **State Cleanup**: Defer cleanup or final state rules to ensure they process last
+- **Dependent Rules**: Ensure prerequisite rules complete before dependent rules execute
+
+**Example:**
+
+```yaml
+rules:
+  # Initiation rule - processed first (no defer flag)
+  - name: "error_detected"
+    namePattern: ".*error.*"
+    messagePattern: ".*detected.*"
+    target: "incident_system"
+    template: |
+      {
+        "action": "create",
+        "incident_id": "${gen_id(extracted.error_id)}",
+        "message": "${text}"
+      }
+
+  # Cancellation rule - processed after initiation (defer: true)
+  - name: "error_resolved"
+    namePattern: ".*error.*"
+    messagePattern: ".*resolved.*"
+    target: "incident_system"
+    defer: true
+    template: |
+      {
+        "action": "close",
+        "incident_id": "${consume_id(extracted.error_id)}",
+        "message": "${text}"
+      }
+
+  # Cleanup rule - processed last (defer: true)
+  - name: "cleanup"
+    namePattern: ".*error.*"
+    target: "cleanup_system"
+    defer: true
+    template: |
+      {
+        "action": "cleanup",
+        "timestamp": "${time.time()}"
+      }
+```
+
+In this example, the processing order is:
+1. `error_detected` rule (immediate) - creates the incident
+2. `error_resolved` rule (deferred) - closes the incident
+3. `cleanup` rule (deferred) - performs cleanup
+
+**Important Notes:**
+
+- All non-deferred rules are processed before any deferred rules, regardless of rule order in the configuration
+- Among deferred rules, the processing order follows the rule order in the configuration
+- If the same event matches multiple deferred rules, they are processed in configuration order
+- Deferred events share the same target system behavior as immediate events (retry logic, rate limiting, etc.)
 
 #### Template Substitution
 
@@ -197,6 +269,35 @@ You can use Python expressions for complex transformations:
 - `len()`, `str()`, `int()`, `float()`, `bool()`
 - `min()`, `max()`, `sum()`, `abs()`, `round()`
 - `upper()`, `lower()` - Convert strings to uppercase or lowercase
+- `gen_id(name)` - Generate a unique ID and map it to a name
+- `consume_id(name)` - Retrieve and consume (delete) an ID mapped to a name
+- `use_id(name)` - Retrieve an ID mapped to a name without consuming it
+
+**ID Generation Functions:**
+
+The transformer provides three functions for generating and managing unique IDs that can be correlated across multiple alerts:
+
+| Function | Description | Example |
+|----------|-------------|---------|
+| `gen_id(name)` | Generates a new unique ID and maps it to the given name. If the name already has an ID, returns the existing ID. | `${gen_id(extracted.correlation_key)}` |
+| `consume_id(name)` | Retrieves the ID mapped to the name and deletes it from the mapping dictionary (one-time use). Returns empty string if not found. | `${consume_id(extracted.correlation_key)}` |
+| `use_id(name)` | Retrieves the ID mapped to the name without deleting it (can be used multiple times). Returns empty string if not found. | `${use_id(extracted.correlation_key)}` |
+
+**ID Function Use Cases:**
+
+These functions are useful for correlating related alerts. For example:
+
+1. **First alert** creates an incident: `"incident_id": "${gen_id(extracted.vm_name)}"`
+2. **Follow-up alerts** reference the same incident: `"incident_id": "${use_id(extracted.vm_name)}"`
+3. **Closing alert** consumes the ID: `"incident_id": "${consume_id(extracted.vm_name)}"`
+
+The IDs are stored in memory and persist for the lifetime of the transformer process.
+
+**Important Notes about ID Mappings:**
+- The ID mappings dictionary is limited to **100,000 entries** to prevent memory leaks
+- If the limit is exceeded, `gen_id()` will log a warning and return an empty string
+- Use `consume_id()` to remove mappings once they are no longer needed
+- Consider the lifecycle of your IDs when designing your alert correlation strategy
 
 **Example Template with Expressions:**
 ```yaml
@@ -218,6 +319,7 @@ template: |
 - `${static.hostname}` - Hostname
 - `${static.vmw_datacenter}` - VMware datacenter name
 - `${static.vmw_cluster}` - VMware cluster name
+
 
 ### Targets Section
 
